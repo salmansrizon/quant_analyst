@@ -4,18 +4,19 @@
 services:
 
   # ── Dagster Webserver ─────────────────────────────────────────────────────────
-  # Free plan — spins down after 15 min idle, spins back up on request
   - type: web
     name: lankabd-dagster
     runtime: docker
     dockerfilePath: ./docker/Dockerfile
-    dockerContext: .                    # project root so dagster_home/ is accessible
+    dockerContext: .
     plan: free
     region: oregon
     disk:
       name: lake-data
       mountPath: /data
       sizeGB: 10
+    startCommand: dagster-webserver -h 0.0.0.0 -p $PORT -m definitions
+    healthCheckPath: /server_info
     envVars:
       - key: DAGSTER_HOME
         value: /dagster_home
@@ -39,11 +40,8 @@ services:
         fromDatabase:
           name: lankabd-postgres
           property: database
-    command: sh -c "dagster-webserver -h 0.0.0.0 -p $PORT -m definitions"
-    healthCheckPath: /server_info
 
   # ── Dagster Daemon ────────────────────────────────────────────────────────────
-  # Starter plan required — daemon must stay always-on to fire schedules/sensors
   - type: worker
     name: lankabd-dagster-daemon
     runtime: docker
@@ -55,6 +53,7 @@ services:
       name: lake-data-daemon
       mountPath: /data
       sizeGB: 10
+    startCommand: dagster-daemon run -m definitions
     envVars:
       - key: DAGSTER_HOME
         value: /dagster_home
@@ -78,7 +77,6 @@ services:
         fromDatabase:
           name: lankabd-postgres
           property: database
-    command: dagster-daemon run -m definitions
 
   # ── Apache Superset ───────────────────────────────────────────────────────────
   - type: web
@@ -88,40 +86,23 @@ services:
     dockerContext: ./superset
     plan: starter
     region: oregon
+    startCommand: >-
+      sh -c "superset db upgrade &&
+      superset fab create-admin --username admin --firstname Admin --lastname User --email admin@lankabd.com --password $SUPERSET_ADMIN_PASSWORD 2>/dev/null || true &&
+      superset init &&
+      gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 'superset.app:create_app()'"
+    healthCheckPath: /health
     envVars:
       - key: SUPERSET_SECRET_KEY
         generateValue: true
       - key: SUPERSET_ADMIN_PASSWORD
-        sync: false                     # set manually in Render dashboard
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: lankabd-superset-db
           property: connectionString
-      - key: LAKE_DB_URL
-        fromDatabase:
-          name: lankabd-postgres
-          property: connectionString
-    command: >
-      sh -c "
-        superset db upgrade &&
-        superset fab create-admin
-          --username admin
-          --firstname Admin
-          --lastname User
-          --email admin@lankabd.com
-          --password $$SUPERSET_ADMIN_PASSWORD 2>/dev/null || true &&
-        superset init &&
-        gunicorn
-          --bind 0.0.0.0:$$PORT
-          --workers 2
-          --timeout 120
-          --keep-alive 5
-          'superset.app:create_app()'
-      "
-    healthCheckPath: /health
 
   # ── Daily Scraper Cron Job ────────────────────────────────────────────────────
-  # Runs full pipeline: scrape → parquet → load to postgres
   - type: cron
     name: lankabd-scraper-daily
     runtime: docker
@@ -129,11 +110,18 @@ services:
     dockerContext: .
     plan: starter
     region: oregon
-    schedule: "0 6 * * *"             # 06:00 UTC every day
+    schedule: "0 6 * * *"
     disk:
       name: lake-data-cron
       mountPath: /data
       sizeGB: 10
+    startCommand: >-
+      sh -c "cd /opt/scrapers &&
+      python dataGrid.py &&
+      python priceArchive.py &&
+      python announcement.py &&
+      python csv_to_parquet.py &&
+      python pg_loader.py"
     envVars:
       - key: PYTHONPATH
         value: /opt/scrapers
@@ -157,15 +145,6 @@ services:
         fromDatabase:
           name: lankabd-postgres
           property: database
-    command: >
-      sh -c "
-        cd /opt/scrapers &&
-        python dataGrid.py &&
-        python priceArchive.py &&
-        python announcement.py &&
-        python csv_to_parquet.py &&
-        python pg_loader.py
-      "
 
 databases:
 
@@ -177,7 +156,7 @@ databases:
     region: oregon
     postgresMajorVersion: "16"
 
-  # ── Superset metadata ────────────────────────────────────────────────────────
+  # ── Superset metadata ─────────────────────────────────────────────────────────
   - name: lankabd-superset-db
     databaseName: superset
     user: superset
