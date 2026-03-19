@@ -2,14 +2,26 @@ FROM apache/superset:3.1.0
 
 USER root
 
-# Install postgres driver
 RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.9 \
-    gevent==23.9.1
+    gunicorn==22.0.0
 
-# Copy config
 COPY superset_config.py /app/pythonpath/superset_config.py
 
 USER superset
 
-EXPOSE 10000
+# Render injects $PORT — superset_config.py reads DATABASE_URL from env
+CMD ["sh", "-c", \
+     "superset db upgrade && \
+      superset fab create-admin \
+        --username admin \
+        --firstname Admin \
+        --lastname User \
+        --email admin@lankabd.com \
+        --password ${SUPERSET_ADMIN_PASSWORD:-admin123} 2>/dev/null || true && \
+      superset init && \
+      gunicorn \
+        --bind 0.0.0.0:${PORT:-8088} \
+        --workers 2 \
+        --timeout 120 \
+        'superset.app:create_app()'"]

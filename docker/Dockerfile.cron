@@ -1,0 +1,28 @@
+# Scraper Cron — runs full pipeline once then exits
+FROM python:3.12-slim AS base
+
+WORKDIR /opt/scrapers
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libxml2-dev \
+        libxslt1-dev \
+        curl \
+    && rm -rf /var/lib/apt/calls/*
+
+FROM base AS deps
+COPY scrapers/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+FROM deps AS runtime
+COPY scrapers/ /opt/scrapers/
+COPY dagster_home/dagster.yaml /dagster_home/dagster.yaml
+
+RUN mkdir -p /data/raw /data/processed /data/archive /data/logs /dagster_home
+
+ENV DAGSTER_HOME=/dagster_home
+ENV PYTHONPATH=/opt/scrapers
+ENV DATA_ROOT=/data
+
+# Runs full pipeline: scrape → parquet → postgres
+CMD ["sh", "-c", "cd /opt/scrapers && python dataGrid.py && python priceArchive.py && python announcement.py && python csv_to_parquet.py && python pg_loader.py"]
