@@ -1,0 +1,23 @@
+# Web scraping
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# Data processing
+pandas==2.2.2
+pyarrow==16.1.0
+duckdb==1.0.0
+
+# Dagster
+dagster==1.7.7
+dagster-webserver==1.7.7
+dagster-postgres==0.23.7
+dagster-pandas==0.23.7
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.30
+
+# Utilities
+python-dotenv==1.0.1
+gunicorn==22.0.0

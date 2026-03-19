@@ -1,0 +1,175 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  LankaBD Data Lake  –  docker-compose.yml  (local development)
+#
+#  Services
+#  ├── postgres            Dagster metadata + lake.* tables for Superset
+#  ├── superset_db         Superset metadata (separate DB)
+#  ├── dagster_webserver   Dagster UI  →  http://localhost:3000
+#  ├── dagster_daemon      Schedules + sensors
+#  ├── superset            Apache Superset  →  http://localhost:8088
+#  └── scraper             One-shot manual runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  DAGSTER_HOME: /dagster_home
+  DAGSTER_PG_HOST: postgres
+  DAGSTER_PG_USER: dagster
+  DAGSTER_PG_PASSWORD: ${POSTGRES_PASSWORD:-dagster_secret}
+  DAGSTER_PG_DB: dagster
+  PYTHONPATH: /opt/scrapers
+  DATA_ROOT: /data
+
+x-common-volumes: &common-volumes
+  - lake_data:/data
+  - dagster_home:/dagster_home
+  - ./dagster_home/dagster.yaml:/dagster_home/dagster.yaml:ro
+  - ./scrapers:/opt/scrapers
+
+services:
+
+  # ── PostgreSQL (Dagster + lake tables) ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dagster
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dagster_secret}
+      POSTGRES_DB: dagster
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./superset/init_lake_db.sql:/docker-entrypoint-initdb.d/init_lake_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dagster"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lake_net
+
+  # ── PostgreSQL (Superset metadata) ───────────────────────────────────────────
+  superset_db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:-superset_secret}
+      POSTGRES_DB: superset
+    volumes:
+      - superset_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lake_net
+
+  # ── Dagster webserver ────────────────────────────────────────────────────────
+  dagster_webserver:
+    build:
+      context: .                        # project root (matches render.yaml)
+      dockerfile: ./docker/Dockerfile
+    image: lankabd_scraper:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes: *common-volumes
+    working_dir: /opt/scrapers
+    command: sh -c "dagster-webserver -h 0.0.0.0 -p $${PORT:-3000} -m definitions"
+    networks:
+      - lake_net
+
+  # ── Dagster daemon ───────────────────────────────────────────────────────────
+  dagster_daemon:
+    image: lankabd_scraper:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dagster_webserver:
+        condition: service_started
+    environment:
+      <<: *common-env
+    volumes: *common-volumes
+    working_dir: /opt/scrapers
+    command: dagster-daemon run -m definitions
+    networks:
+      - lake_net
+
+  # ── Apache Superset ──────────────────────────────────────────────────────────
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile.superset
+    restart: unless-stopped
+    depends_on:
+      superset_db:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-a_very_long_random_secret_key_change_me}
+      DATABASE_URL: postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset_secret}@superset_db:5432/superset
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-admin123}
+      PORT: 8088
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    command: >
+      sh -c "
+        superset db upgrade &&
+        superset fab create-admin
+          --username admin
+          --firstname Admin
+          --lastname User
+          --email admin@lankabd.com
+          --password $${SUPERSET_ADMIN_PASSWORD:-admin123} 2>/dev/null || true &&
+        superset init &&
+        gunicorn
+          --bind 0.0.0.0:$${PORT:-8088}
+          --workers 2
+          --timeout 120
+          'superset.app:create_app()'
+      "
+    networks:
+      - lake_net
+
+  # ── One-shot manual runner ───────────────────────────────────────────────────
+  # docker compose run --rm scraper python dataGrid.py
+  # docker compose run --rm scraper python pg_loader.py
+  # docker compose run --rm scraper dagster job execute -m definitions -j datagrid_job
+  scraper:
+    image: lankabd_scraper:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    volumes: *common-volumes
+    working_dir: /opt/scrapers
+    entrypoint: []
+    networks:
+      - lake_net
+
+volumes:
+  lake_data:
+    name: lankabd_lake_data
+  pg_data:
+    name: lankabd_pg_data
+  dagster_home:
+    name: lankabd_dagster_home
+  superset_db_data:
+    name: lankabd_superset_db_data
+  superset_home:
+    name: lankabd_superset_home
+
+networks:
+  lake_net:
+    name: lankabd_network

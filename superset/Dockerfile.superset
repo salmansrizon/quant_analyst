@@ -1,0 +1,15 @@
+FROM apache/superset:3.1.0
+
+USER root
+
+# Install postgres driver
+RUN pip install --no-cache-dir \
+    psycopg2-binary==2.9.9 \
+    gevent==23.9.1
+
+# Copy config
+COPY superset_config.py /app/pythonpath/superset_config.py
+
+USER superset
+
+EXPOSE 10000

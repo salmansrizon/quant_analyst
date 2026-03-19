@@ -1,0 +1,186 @@
+# render.yaml — LankaBD Data Lake on Render
+# Deploy: render.com → New → Blueprint → connect GitHub repo
+
+services:
+
+  # ── Dagster Webserver ─────────────────────────────────────────────────────────
+  # Free plan — spins down after 15 min idle, spins back up on request
+  - type: web
+    name: lankabd-dagster
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .                    # project root so dagster_home/ is accessible
+    plan: free
+    region: oregon
+    disk:
+      name: lake-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: DAGSTER_HOME
+        value: /dagster_home
+      - key: PYTHONPATH
+        value: /opt/scrapers
+      - key: DATA_ROOT
+        value: /data
+      - key: DAGSTER_PG_HOST
+        fromDatabase:
+          name: lankabd-postgres
+          property: host
+      - key: DAGSTER_PG_USER
+        fromDatabase:
+          name: lankabd-postgres
+          property: user
+      - key: DAGSTER_PG_PASSWORD
+        fromDatabase:
+          name: lankabd-postgres
+          property: password
+      - key: DAGSTER_PG_DB
+        fromDatabase:
+          name: lankabd-postgres
+          property: database
+    command: sh -c "dagster-webserver -h 0.0.0.0 -p $PORT -m definitions"
+    healthCheckPath: /server_info
+
+  # ── Dagster Daemon ────────────────────────────────────────────────────────────
+  # Starter plan required — daemon must stay always-on to fire schedules/sensors
+  - type: worker
+    name: lankabd-dagster-daemon
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    disk:
+      name: lake-data-daemon
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: DAGSTER_HOME
+        value: /dagster_home
+      - key: PYTHONPATH
+        value: /opt/scrapers
+      - key: DATA_ROOT
+        value: /data
+      - key: DAGSTER_PG_HOST
+        fromDatabase:
+          name: lankabd-postgres
+          property: host
+      - key: DAGSTER_PG_USER
+        fromDatabase:
+          name: lankabd-postgres
+          property: user
+      - key: DAGSTER_PG_PASSWORD
+        fromDatabase:
+          name: lankabd-postgres
+          property: password
+      - key: DAGSTER_PG_DB
+        fromDatabase:
+          name: lankabd-postgres
+          property: database
+    command: dagster-daemon run -m definitions
+
+  # ── Apache Superset ───────────────────────────────────────────────────────────
+  - type: web
+    name: lankabd-superset
+    runtime: docker
+    dockerfilePath: ./superset/Dockerfile.superset
+    dockerContext: ./superset
+    plan: starter
+    region: oregon
+    envVars:
+      - key: SUPERSET_SECRET_KEY
+        generateValue: true
+      - key: SUPERSET_ADMIN_PASSWORD
+        sync: false                     # set manually in Render dashboard
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lankabd-superset-db
+          property: connectionString
+      - key: LAKE_DB_URL
+        fromDatabase:
+          name: lankabd-postgres
+          property: connectionString
+    command: >
+      sh -c "
+        superset db upgrade &&
+        superset fab create-admin
+          --username admin
+          --firstname Admin
+          --lastname User
+          --email admin@lankabd.com
+          --password $$SUPERSET_ADMIN_PASSWORD 2>/dev/null || true &&
+        superset init &&
+        gunicorn
+          --bind 0.0.0.0:$$PORT
+          --workers 2
+          --timeout 120
+          --keep-alive 5
+          'superset.app:create_app()'
+      "
+    healthCheckPath: /health
+
+  # ── Daily Scraper Cron Job ────────────────────────────────────────────────────
+  # Runs full pipeline: scrape → parquet → load to postgres
+  - type: cron
+    name: lankabd-scraper-daily
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    schedule: "0 6 * * *"             # 06:00 UTC every day
+    disk:
+      name: lake-data-cron
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/scrapers
+      - key: DATA_ROOT
+        value: /data
+      - key: DAGSTER_HOME
+        value: /dagster_home
+      - key: DAGSTER_PG_HOST
+        fromDatabase:
+          name: lankabd-postgres
+          property: host
+      - key: DAGSTER_PG_USER
+        fromDatabase:
+          name: lankabd-postgres
+          property: user
+      - key: DAGSTER_PG_PASSWORD
+        fromDatabase:
+          name: lankabd-postgres
+          property: password
+      - key: DAGSTER_PG_DB
+        fromDatabase:
+          name: lankabd-postgres
+          property: database
+    command: >
+      sh -c "
+        cd /opt/scrapers &&
+        python dataGrid.py &&
+        python priceArchive.py &&
+        python announcement.py &&
+        python csv_to_parquet.py &&
+        python pg_loader.py
+      "
+
+databases:
+
+  # ── Dagster metadata + lake data tables ──────────────────────────────────────
+  - name: lankabd-postgres
+    databaseName: dagster
+    user: dagster
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
+
+  # ── Superset metadata ────────────────────────────────────────────────────────
+  - name: lankabd-superset-db
+    databaseName: superset
+    user: superset
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
